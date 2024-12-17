@@ -58,11 +58,11 @@ def crawl_web():
         # Get the following pending URL
         pending_url = get_next_pending_url()
         if not pending_url:
-            print("No hay más URLs pendientes. Finalizando...")
+            print("No more URLs pending. Ending...")
             break
 
         url_id, url = pending_url
-        print(f"Procesando {url}...")
+        print(f"Processing {url}...")
 
         # Process the page
         links = process_page(url)
