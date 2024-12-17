@@ -1,10 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from db_connection import get_next_pending_url, remove_pending_url, add_pending_url, save_page_data
+from db_connection import get_next_pending_url, remove_pending_url, add_pending_url, save_page_data, normalize_url
 from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 import hashlib
-import time
 
 # Calculate the hash of the page content
 def calculate_hash(content):
@@ -22,9 +21,9 @@ def fetch_url(url):
         print(f"Error accessing {url}: {e}")
     return None
 
-# Processing and saving a web page
+# Process a web page
 def process_page(url):
-    print(f"Processing {url}...")
+    print(f"Procesando {url}...")
     html_content = fetch_url(url)
     if not html_content:
         return []
@@ -34,49 +33,51 @@ def process_page(url):
     title = soup.title.string if soup.title else "Sin título"
     content_hash = calculate_hash(html_content)
 
-    # Determine whether it is internal or external
-    parsed_url = urlparse(url)
-    base_domain = parsed_url.netloc
-
-    # Save the page in the database
+    # Saving the page data in the database
     save_page_data(url, title, content_hash, is_external=False)
 
-    # Extract links
+    # Extract and normalize links
     links = set()
     for link in soup.find_all('a', href=True):
-        full_url = urljoin(url, link['href'])
-        parsed_link = urlparse(full_url)
-        if parsed_link.scheme in ['http', 'https']:
-            is_external = parsed_link.netloc != base_domain
-            links.add((full_url, is_external))
+        full_url = urljoin(url, link['href'])  # Solve relative links
+        normalized_url = normalize_url(full_url)
+        links.add(normalized_url)
+
     return links
 
-# Processing a URL
+# Process a pending URL
 def process_pending_url(url_id, url):
-    links = process_page(url)
-    remove_pending_url(url_id)
-    for link, is_external in links:
-        add_pending_url(link)
-        save_page_data(link, None, None, is_external)
+    try:
+        links = process_page(url)  # Process the page and obtain links
+    finally:
+        remove_pending_url(url_id)  # Remove the URL from the queue, even if errors occurred
 
-# Function to handle concurrency
+    for link in links:
+        add_pending_url(link)  # Add only unique URLs to the queue
+        save_page_data(link, None, None, is_external=urlparse(link).netloc != urlparse(url).netloc)
+
+# Running the concurrent crawler
 def run_concurrent_crawling(max_workers=5):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         while True:
             futures = []
             for _ in range(max_workers):
+                # Get the following pending URL
                 pending_url = get_next_pending_url()
                 if not pending_url:
-                    break
+                    break  # No more pending URLs, exit loop
                 url_id, url = pending_url
+                # Send the task to the thread pool
                 futures.append(executor.submit(process_pending_url, url_id, url))
 
+            # Wait for all tasks to be completed
             for future in as_completed(futures):
                 try:
-                    future.result()
+                    future.result()  # Lifts exceptions if any
                 except Exception as e:
                     print(f"Error processing a URL: {e}")
 
+            # If no more tasks have been sent, finish
             if not futures:
                 print("There are no more URLs pending. Ending...")
                 break
