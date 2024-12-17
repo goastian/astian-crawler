@@ -7,6 +7,7 @@ if __name__ == "__main__":
     # Initial URLs
     start_urls = [
         "https://astian.org",
+        "https://reddit.org",
         "https://amazon.com",
         "https://www.python.org",
         "https://www.wikipedia.org",
