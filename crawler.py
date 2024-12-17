@@ -52,6 +52,17 @@ def process_page(url):
 
     return links
 
+
+# Function to process a URL from the queue
+def process_pending_url(url_id, url):
+    link = process_page(url)
+    remove_pending_url(url_id) #Mark the URL as processed
+
+    # Add new links to the queue
+    for link, is_external in link:
+        add_pending_url(link)
+        save_page_data(link, None, None, is_external)
+
 # Main crawler
 def crawl_web():
     while True:
