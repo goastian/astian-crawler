@@ -1,5 +1,6 @@
+import asyncio
 from db_connection import init_db, add_pending_url
-from concurrency import run_concurrent_crawling
+from concurrency import run_crawler
 
 if __name__ == "__main__":
     init_db()
@@ -7,7 +8,7 @@ if __name__ == "__main__":
     # Initial URLs
     start_urls = [
         "https://astian.org",
-        "https://reddit.org",
+        "https://reddit.com",
         "https://amazon.com",
         "https://www.python.org",
         "https://www.wikipedia.org",
@@ -23,11 +24,10 @@ if __name__ == "__main__":
         "https://www.mozilla.com",
         "https://www.gitee.com"
     ]
-    
-    # Add initial URLs to the database
+
+    # Añadir URLs iniciales a la cola
     for url in start_urls:
         add_pending_url(url)
 
-    # Running the concurrent crawler
-    print("Iniciando el crawler con concurrencia...")
-    run_concurrent_crawling(max_workers=5)
+    # Ejecutar el crawler asíncrono
+    asyncio.run(run_crawler(max_concurrent_tasks=10))
