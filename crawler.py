@@ -25,9 +25,9 @@ if __name__ == "__main__":
         "https://www.gitee.com"
     ]
 
-    # Añadir URLs iniciales a la cola
+    # Add initial URLs to the queue
     for url in start_urls:
         add_pending_url(url)
 
-    # Ejecutar el crawler asíncrono
+    # Running the asynchronous crawler
     asyncio.run(run_crawler(max_concurrent_tasks=10))

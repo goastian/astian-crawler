@@ -1,88 +1,113 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from db_connection import get_next_pending_url, remove_pending_url, add_pending_url, save_page_data, normalize_url
-from urllib.parse import urljoin, urlparse
-import requests
+import asyncio
+import aiohttp
+from aiohttp import ClientSession, ClientError
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
 import hashlib
+from db_connection import save_page_data, add_pending_url, remove_pending_url, normalize_url, get_next_pending_url, get_db_connection
 
 # Calculate the hash of the page content
 def calculate_hash(content):
     return hashlib.sha256(content.encode('utf-8')).hexdigest()
 
-# Download and process the web page
-def fetch_url(url):
-    try:
-        print(f"[INFO] Downloading: {url}")  # Log: URL being downloaded
-        response = requests.get(url, timeout=10, headers={'User-Agent': 'AstianBot'})
-        if response.status_code == 200:
-            return response.text
-        else:
-            print(f"[ERROR] Error {response.status_code} accessing {url}")
-    except requests.RequestException as e:
-        print(f"[ERROR] Error accessing {url}: {e}")
+# Downloading the content of a URL using aiohttp
+async def fetch_url(url: str, retries=3):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    }
+
+    for attempt in range(retries):
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(url, timeout=10, allow_redirects=True) as response:
+                    if response.status == 200:
+                        print(f"[INFO] Downloading: {url}")
+                        html = await response.text(encoding=response.charset or "utf-8", errors="replace")
+                        return html
+                    else:
+                        print(f"[ERROR] Error {response.status} accessing {url}")
+        except (ClientError, asyncio.TimeoutError) as e:
+            print(f"[WARNING] Error accessing {url} (Attempt {attempt+1}/{retries}): {e}")
+            await asyncio.sleep(2 ** attempt)  # Exponential Retry
     return None
 
-# Process a web page
-def process_page(url):
-    print(f"\n[INFO] Processing page: {url}")  # Log principal
-    html_content = fetch_url(url)
+
+async def process_page(url: str):
+    print(f"[INFO] Processing page: {url}")
+    html_content = await fetch_url(url)
+
     if not html_content:
-        print(f"[WARNING] Unable to download: {url}")
+        print(f"[WARNING] Could not download: {url}")
         return []
 
-    # Analyze page content
-    soup = BeautifulSoup(html_content, 'html.parser')
-    title = soup.title.string if soup.title else "Sin título"
     content_hash = calculate_hash(html_content)
+    print(f"[INFO] Hash calculated for {url}: {content_hash}")
 
-    # Saving the page data in the database
+    soup = BeautifulSoup(html_content, 'html.parser')
+    title = soup.title.string.strip() if soup.title and soup.title.string else "Untitled"
+
+    print(f"[INFO] Title extracted for {url}: {title}")
     save_page_data(url, title, content_hash, is_external=False)
-    print(f"[SUCCESS] Saved page: {url} (Title: {title})")  # Confirmation of saving
 
-    # Extract and normalize links
     links = set()
+    base_domain = urlparse(url).netloc
     for link in soup.find_all('a', href=True):
-        full_url = urljoin(url, link['href'])  # Solve relative links
+        full_url = urljoin(url, link['href'])
         normalized_url = normalize_url(full_url)
-        links.add(normalized_url)
 
-    print(f"[INFO] Enlaces encontrados en {url}: {len(links)}")  # Link quantity log
+        if normalized_url and urlparse(normalized_url).scheme in ['http', 'https']:
+            is_external = urlparse(normalized_url).netloc != base_domain
+            links.add((normalized_url, is_external))
+
+    print(f"[INFO] Links found in {url}: {len(links)}")
     return links
 
+
 # Process a pending URL
-def process_pending_url(url_id, url):
-    try:
-        links = process_page(url)  # Process the page and obtain links
-    finally:
-        remove_pending_url(url_id)  # Remove the URL from the queue, even if errors occurred
+async def process_pending_url(url_id: int, url: str):
+    links = await process_page(url)
+    remove_pending_url(url_id)
 
-    for link in links:
-        add_pending_url(link)  # Only add unique URLs
-        save_page_data(link, None, None, is_external=urlparse(link).netloc != urlparse(url).netloc)
+    for link, is_external in links:
+        if not url_exists(link):
+            add_pending_url(link)
+            save_page_data(link, None, None, is_external)
 
-# Running the concurrent crawler
-def run_concurrent_crawling(max_workers=5):
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        while True:
-            futures = []
-            for _ in range(max_workers):
-                # Get the following pending URL
-                pending_url = get_next_pending_url()
-                if not pending_url:
-                    break  # No more pending URLs, exit loop
-                url_id, url = pending_url
-                # Send the task to the thread pool
-                print(f"[INFO] Adding to the pool: {url}")  # Log of URLs added to the pool
-                futures.append(executor.submit(process_pending_url, url_id, url))
 
-            # Wait for all tasks to be completed
-            for future in as_completed(futures):
-                try:
-                    future.result()  # Lifts exceptions if any
-                except Exception as e:
-                    print(f"[ERROR] Error processing a URL: {e}")
+# Check if a URL already exists in websites or pending_urls
+def url_exists(url):
+    conn = get_db_connection()
+    if conn is None:
+        return True
+    cursor = conn.cursor()
+    url = normalize_url(url)
+    cursor.execute("""
+        SELECT 1 FROM websites WHERE url = %s
+        UNION
+        SELECT 1 FROM pending_urls WHERE url = %s;
+    """, (url, url))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
 
-            # If no more tasks have been sent, finish
-            if not futures:
-                print("\n[INFO] There are no more URLs pending. Ending...")
+
+# Running the asynchronous crawler
+async def run_crawler(max_concurrent_tasks=10):
+    print("[INFO] Starting the asynchronous crawler...")
+
+    while True:
+        tasks = []
+        for _ in range(max_concurrent_tasks):
+            pending_url = get_next_pending_url()
+            if not pending_url:
                 break
+            url_id, url = pending_url
+            print(f"[INFO] Adding to processing: {url}")
+            tasks.append(process_pending_url(url_id, url))
+
+        if not tasks:
+            print("[INFO] There are no more URLs pending. Ending...")
+            break
+
+        await asyncio.gather(*tasks)
